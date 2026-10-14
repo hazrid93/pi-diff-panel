@@ -25,6 +25,7 @@ To try it once without installing: `pi -e git:github.com/hazrid93/pi-diff-panel`
 | Command / key | Action |
 |---|---|
 | `/diff-panel` | Show or hide the side panel |
+| `/diff-panel on` \| `off` | Show or hide the panel explicitly |
 | `/diff-panel left` \| `right` | Move the panel to that side (default: right) |
 | `ctrl+alt+d` | Focus the panel. Opens it if it is hidden. Press again to unfocus. |
 | `/diff` | Open the diff viewer directly |

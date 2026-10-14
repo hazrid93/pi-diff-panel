@@ -71,11 +71,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function openViewer(target: Ui, index: number): void {
-		if (!state.files.length) {
-			target.notify(state.error ?? "Working tree clean", "info");
-			return;
-		}
-		void target.custom<void>((t, theme, _kb, done) => new DiffView(t, theme, () => state, index, loadDiff, done), {
+		void target.custom<void>((t, theme, _kb, done) => new DiffView(t, theme, () => state, index, loadDiff, done, cwd), {
 			overlay: true,
 			overlayOptions: { anchor: "center", width: "94%", maxHeight: "92%" },
 		});
@@ -129,9 +125,20 @@ export default function (pi: ExtensionAPI) {
 	const shutdown = () => closePanel?.();
 
 	pi.registerCommand("diff-panel", {
-		description: "Toggle the uncommitted-changes side panel: /diff-panel [left|right]",
+		description: "Toggle the uncommitted-changes side panel: /diff-panel [on|off|left|right]",
+		getArgumentCompletions: (prefix) => {
+			const opts = [
+				{ value: "on", label: "on", description: "Show the panel" },
+				{ value: "off", label: "off", description: "Hide the panel" },
+				{ value: "left", label: "left", description: "Show the panel on the left" },
+				{ value: "right", label: "right", description: "Show the panel on the right" },
+			].filter((o) => o.value.startsWith(prefix.trim()));
+			return opts.length ? opts : null;
+		},
 		handler: async (args, ctx) => {
 			const want = args.trim();
+			if (want === "on") return openPanel(ctx);
+			if (want === "off") return shutdown();
 			if (want === "left" || want === "right") {
 				const moving = want !== side;
 				side = want;
@@ -280,6 +287,7 @@ class DiffView implements Component {
 		private index: number,
 		private load: (f: FileEntry) => Promise<string>,
 		private done: () => void,
+		private cwd: string,
 	) {
 		this.reload();
 	}
@@ -372,7 +380,8 @@ class DiffView implements Component {
 		const f = this.file;
 
 		let lines: string[];
-		if (!f) lines = [th.fg("muted", " No uncommitted changes")];
+		if (s.error) lines = [th.fg("warning", ` ${s.error}: ${this.cwd}`)];
+		else if (!f) lines = [` ${th.fg("success", "✓")} ${th.fg("muted", "No uncommitted changes")}`];
 		else if (!this.rows) lines = [th.fg("muted", " Loading…")];
 		else {
 			if (this.cache?.width !== inner) this.cache = { width: inner, lines: this.build(inner) };
