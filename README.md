@@ -1,16 +1,16 @@
 # pi-diff-panel
 
-A [pi](https://pi.dev) extension that keeps a persistent side panel of your **uncommitted git changes** and **current branch**, with a syntax-highlighted diff viewer — similar to `/diff` in Claude Code.
+A [pi](https://pi.dev) extension that shows your **uncommitted git changes** and **current branch** in a panel, with a syntax-highlighted diff viewer — similar to `/diff` in Claude Code.
 
 ```
-╭─ Changes ──────────────────────╮
-│ ⎇ feature/demo ↑2             │
-│ 2 files  +2 -1                │
-│                               │
-│▶ M math.ts              +2 -1 │
-│  ? new.py                     │
-╰─ ↑↓ ⏎ diff · r · esc ──────────╯
+ ⎇ feature/demo ↑2  6 files +10 -7                      ctrl+\ diff · /diff-panel off
+ D docs/notes.txt +0 -1    R src/config.js +0 -0     ? settings.json
+ M src/app.py +6 -3        M src/math.ts +4 -3       ? src/utils.go
+───────────────────────────────────────────────────────────────────────────────
+ > your prompt…
 ```
+
+By default the panel sits just above the editor and opens on every new session. You can move it to the left or right side instead.
 
 ## Install
 
@@ -24,21 +24,56 @@ To try it once without installing: `pi -e git:github.com/hazrid93/pi-diff-panel`
 
 | Command / key | Action |
 |---|---|
-| `/diff-panel` | Show or hide the side panel |
-| `/diff-panel on` \| `off` | Show or hide the panel explicitly |
-| `/diff-panel left` \| `right` | Move the panel to that side (default: right) |
-| `ctrl+alt+d` | Focus the panel. Opens it if it is hidden. Press again to unfocus. |
-| `/diff` | Open the diff viewer directly |
+| `/diff-panel` | Show or hide the panel |
+| `/diff-panel on` \| `off` | Show or hide the panel |
+| `/diff-panel bottom` \| `left` \| `right` | Move the panel (for this session) |
+| `/diff-panel help` | Show keys and settings |
+| `ctrl+\` | Open the diff viewer. With a side panel, focus the panel instead. |
+| `/diff` | Open the diff viewer |
+| Mouse click on a file | Open its diff (fullscreen mode only) |
 
-**When the panel has focus:** `↑/↓` or `j/k` select a file, `Enter` opens its diff, `r` refreshes, `Esc` gives focus back to the editor.
+When the panel is hidden, the footer shows a short hint: `⎇ /diff-panel · ctrl+\ diff`.
 
-**In the diff viewer:** `↑/↓` scroll, `PgUp/PgDn` (or `b`/`space`) page, `g/G` jump to top/bottom, `←/→` (or `h/l`) previous/next file, `Esc`/`q` close.
+**Side panel with focus:** `↑/↓` or `j/k` select, `Enter` opens the diff, `r` refreshes, `Esc` gives focus back to the editor.
 
-The panel shows staged, unstaged, and untracked changes against `HEAD`. It refreshes every 2 seconds and after each agent turn. It hides when the terminal is smaller than 80×12. Syntax highlighting uses pi's built-in highlighter and theme.
+**Diff viewer:** `↑/↓` scroll, `PgUp/PgDn` (or `b`/`space`) page, `g/G` top/bottom, `←/→` (or `h/l`) previous/next file, `Esc`/`q` close.
+
+The panel shows staged, unstaged, and untracked changes against `HEAD`. It refreshes every 2 seconds and after each agent turn. The bottom panel hides itself outside git repositories.
+
+## Settings
+
+Add a `diffPanel` block to `~/.pi/agent/settings.json`, then run `/reload`:
+
+```json
+{
+  "diffPanel": {
+    "position": "bottom",
+    "key": "ctrl+\\",
+    "autoShow": true
+  }
+}
+```
+
+| Setting | Values | Default |
+|---|---|---|
+| `position` | `"bottom"`, `"left"`, `"right"` | `"bottom"` |
+| `key` | a key, or a list of keys, in [pi key syntax](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/keybindings.md#key-syntax) | `"ctrl+\\"` |
+| `autoShow` | `true` shows the panel on every new session; `false` shows only the footer hint | `true` |
+
+### Choosing a key on macOS
+
+The default is `ctrl+\` because pi does not use it and macOS terminals send it unchanged. Some keys do not work well:
+
+- `ctrl+alt+…` — Option often types a special character instead.
+- `ctrl+shift+p` — pi already uses it to change the model.
+- `cmd+shift+p` (`super+shift+p`) — most terminals keep Cmd shortcuts for themselves. It only works in terminals with the Kitty keyboard protocol, such as Kitty, Ghostty, or WezTerm.
+- `shift+p` — you could not type a capital P any more.
+
+Function keys such as `"f2"` are a safe alternative.
 
 ## Notes
 
-- The panel is a non-capturing overlay drawn above the transcript, because pi has no split layout. On narrow terminals it covers part of the chat. Toggle it with `/diff-panel` when you need the space.
+- The side panels are drawn over the transcript, because pi has no split layout. On narrow terminals they cover part of the chat.
 - Very large diffs are cut at 5000 lines.
 
 ## Development

@@ -1,6 +1,9 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
 	type ExtensionAPI,
 	type ExtensionContext,
+	getAgentDir,
 	getLanguageFromPath,
 	highlightCode,
 	type Theme,
@@ -11,30 +14,69 @@ import {
 	matchesKey,
 	type OverlayHandle,
 	type TUI,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { type DiffRow, type FileEntry, parseNumstat, parseStatusV2, parseUnified, type RepoState } from "./git.ts";
 
-const FOCUS_KEY = "ctrl+alt+d";
-// shortcut: fixed rows kept free under the panel for editor + footer; a tall multi-line editor can still be covered.
+type Position = "bottom" | "left" | "right";
+const POSITIONS: Position[] = ["bottom", "left", "right"];
+
+// ctrl+\ is unused by pi and reaches pi from macOS terminals (ctrl+alt and cmd chords often don't).
+const DEFAULT_KEYS = ["ctrl+\\"];
+
+/** Reads the `diffPanel` block of ~/.pi/agent/settings.json. Changes apply after /reload. */
+function loadConfig(): { position: Position; keys: string[]; autoShow: boolean } {
+	let raw: Record<string, unknown> = {};
+	try {
+		raw = JSON.parse(readFileSync(join(getAgentDir(), "settings.json"), "utf8"))?.diffPanel ?? {};
+	} catch {
+		// missing or invalid settings: use defaults
+	}
+	const keys = (Array.isArray(raw.key) ? raw.key : [raw.key]).filter(
+		(k): k is string => typeof k === "string" && k.length > 0,
+	);
+	return {
+		position: POSITIONS.includes(raw.position as Position) ? (raw.position as Position) : "bottom",
+		keys: keys.length ? keys : DEFAULT_KEYS,
+		autoShow: raw.autoShow !== false,
+	};
+}
+
+const CONFIG = loadConfig();
+const KEY_LABEL = CONFIG.keys[0]!;
+// shortcut: fixed rows kept free under the side panel for editor + footer; a tall multi-line editor can still be covered.
 const BOTTOM_RESERVE = 7;
+const BAR_ROWS = 3;
 const REFRESH_MS = 2000;
 // shortcut: very large diffs are cut at this many rows to keep highlighting fast.
 const MAX_ROWS = 5000;
+
+const HELP = [
+	"pi-diff-panel",
+	"  /diff-panel                 toggle the panel",
+	"  /diff-panel on | off        show or hide",
+	"  /diff-panel bottom|left|right  move it (this session)",
+	`  ${KEY_LABEL.padEnd(26)}  open diffs (bottom) or focus panel (side)`,
+	"  /diff                       open the diff viewer",
+	"Settings (~/.pi/agent/settings.json, then /reload):",
+	'  "diffPanel": { "position": "bottom", "key": "ctrl+\\\\", "autoShow": true }',
+].join("\n");
 
 type Ui = ExtensionContext["ui"];
 
 export default function (pi: ExtensionAPI) {
 	let state: RepoState = { branch: "", ahead: 0, behind: 0, files: [] };
 	let cwd = process.cwd();
-	let side: "left" | "right" = "right";
+	let position: Position = CONFIG.position;
+	let shown = false;
 	let ui: Ui | undefined;
 	let tui: TUI | undefined;
 	let handle: OverlayHandle | undefined;
 	let closePanel: (() => void) | undefined;
 	let timer: ReturnType<typeof setInterval> | undefined;
-	let focusOnShow = false;
 	let refreshing = false;
 
 	const git = (args: string[]) => pi.exec("git", ["-c", "core.quotePath=false", ...args], { cwd, timeout: 10_000 });
@@ -77,77 +119,98 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
-	function openPanel(ctx: ExtensionContext): void {
-		if (closePanel || ctx.mode !== "tui") return;
-		ui = ctx.ui;
-		cwd = ctx.cwd;
-		void ctx.ui
-			.custom<void>(
-				(t, theme, _kb, done) => {
-					tui = t;
-					closePanel = () => done();
-					return new DiffPanel(
-						t,
-						theme,
-						() => state,
-						(i) => ui && openViewer(ui, i),
-						() => handle?.unfocus(),
-						() => void refresh(),
-					);
-				},
-				{
-					overlay: true,
-					overlayOptions: {
-						nonCapturing: true,
-						anchor: side === "right" ? "top-right" : "top-left",
-						width: "34%",
-						minWidth: 30,
-						visible: (w, h) => w >= 80 && h >= 12,
-					},
-					onHandle: (h) => {
-						handle = h;
-						if (focusOnShow) h.focus();
-						focusOnShow = false;
-					},
-				},
-			)
-			.finally(() => {
-				clearInterval(timer);
-				timer = undefined;
-				handle = undefined;
-				closePanel = undefined;
-				tui = undefined;
-			});
-		timer = setInterval(() => void refresh(), REFRESH_MS);
-		void refresh();
+	/** Footer hint so users who have the extension know how to open the panel. */
+	function setHint(ctx: ExtensionContext): void {
+		ctx.ui.setStatus("diff-panel", shown ? undefined : ctx.ui.theme.fg("muted", `⎇ /diff-panel · ${KEY_LABEL} diff`));
 	}
 
-	const shutdown = () => closePanel?.();
+	function showPanel(ctx: ExtensionContext): void {
+		if (shown || ctx.mode !== "tui") return;
+		shown = true;
+		ui = ctx.ui;
+		cwd = ctx.cwd;
+		if (position === "bottom") {
+			ctx.ui.setWidget("diff-panel", (t, theme) => {
+				tui = t;
+				return new BottomBar(theme, () => state, (i) => ui && openViewer(ui, i));
+			});
+			closePanel = () => ctx.ui.setWidget("diff-panel", undefined);
+		} else {
+			void ctx.ui
+				.custom<void>(
+					(t, theme, _kb, done) => {
+						tui = t;
+						closePanel = () => done();
+						return new DiffPanel(
+							t,
+							theme,
+							() => state,
+							(i) => ui && openViewer(ui, i),
+							() => handle?.unfocus(),
+							() => void refresh(),
+						);
+					},
+					{
+						overlay: true,
+						overlayOptions: {
+							nonCapturing: true,
+							anchor: position === "right" ? "top-right" : "top-left",
+							width: "34%",
+							minWidth: 30,
+							visible: (w, h) => w >= 80 && h >= 12,
+						},
+						onHandle: (h) => {
+							handle = h;
+						},
+					},
+				)
+				.finally(() => {
+					handle = undefined;
+				});
+		}
+		clearInterval(timer);
+		timer = setInterval(() => void refresh(), REFRESH_MS);
+		void refresh();
+		setHint(ctx);
+	}
+
+	function hidePanel(ctx?: ExtensionContext): void {
+		if (!shown) return;
+		shown = false;
+		clearInterval(timer);
+		timer = undefined;
+		const close = closePanel;
+		closePanel = undefined;
+		tui = undefined;
+		close?.();
+		if (ctx) setHint(ctx);
+	}
 
 	pi.registerCommand("diff-panel", {
-		description: "Toggle the uncommitted-changes side panel: /diff-panel [on|off|left|right]",
+		description: "Show or hide the uncommitted-changes panel: /diff-panel [on|off|bottom|left|right|help]",
 		getArgumentCompletions: (prefix) => {
 			const opts = [
 				{ value: "on", label: "on", description: "Show the panel" },
 				{ value: "off", label: "off", description: "Hide the panel" },
-				{ value: "left", label: "left", description: "Show the panel on the left" },
-				{ value: "right", label: "right", description: "Show the panel on the right" },
+				{ value: "bottom", label: "bottom", description: "Show the panel above the editor" },
+				{ value: "left", label: "left", description: "Show the panel on the left side" },
+				{ value: "right", label: "right", description: "Show the panel on the right side" },
+				{ value: "help", label: "help", description: "Show keys and settings" },
 			].filter((o) => o.value.startsWith(prefix.trim()));
 			return opts.length ? opts : null;
 		},
 		handler: async (args, ctx) => {
 			const want = args.trim();
-			if (want === "on") return openPanel(ctx);
-			if (want === "off") return shutdown();
-			if (want === "left" || want === "right") {
-				const moving = want !== side;
-				side = want;
-				if (moving) shutdown();
-				if (!closePanel) openPanel(ctx);
-				return;
-			}
-			if (closePanel) shutdown();
-			else openPanel(ctx);
+			if (POSITIONS.includes(want as Position)) {
+				position = want as Position;
+				hidePanel(ctx);
+				showPanel(ctx);
+			} else if (want === "on") showPanel(ctx);
+			else if (want === "off") hidePanel(ctx);
+			else if (want === "help") ctx.ui.notify(HELP, "info");
+			else if (want) ctx.ui.notify(`Unknown option "${want}". Try: on, off, bottom, left, right, help`, "warning");
+			else if (shown) hidePanel(ctx);
+			else showPanel(ctx);
 		},
 	});
 
@@ -161,19 +224,103 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerShortcut(FOCUS_KEY, {
-		description: "Focus the diff panel (opens it if hidden)",
-		handler: (ctx) => {
-			if (!closePanel) {
-				focusOnShow = true;
-				openPanel(ctx);
-			} else if (handle?.isFocused()) handle.unfocus();
+	// Side panel: toggle focus. Bottom bar (or hidden panel): open the diff viewer.
+	const onKey = async (ctx: ExtensionContext) => {
+		if (shown && position !== "bottom") {
+			if (handle?.isFocused()) handle.unfocus();
 			else handle?.focus();
-		},
-	});
+			return;
+		}
+		cwd = ctx.cwd;
+		await refresh();
+		openViewer(ctx.ui, 0);
+	};
+	for (const key of CONFIG.keys) {
+		pi.registerShortcut(key as Parameters<typeof pi.registerShortcut>[0], {
+			description: "Open uncommitted diffs (focuses the side panel when it is on the left/right)",
+			handler: onKey,
+		});
+	}
 
+	pi.on("session_start", (_event, ctx) => {
+		if (ctx.mode !== "tui") return;
+		if (CONFIG.autoShow) showPanel(ctx);
+		else setHint(ctx);
+	});
 	pi.on("agent_end", () => void refresh());
-	pi.on("session_shutdown", shutdown);
+	pi.on("session_shutdown", () => {
+		try {
+			hidePanel();
+		} catch {
+			// UI may already be torn down
+		}
+	});
+}
+
+// ─── bottom bar ────────────────────────────────────────────────────────────────
+
+/** Compact widget above the editor: branch, totals, and files in columns. Click a file to open its diff. */
+class BottomBar implements Component {
+	private hits: { row: number; from: number; to: number; idx: number }[] = [];
+
+	constructor(
+		private theme: Theme,
+		private getState: () => RepoState,
+		private onOpen: (index: number) => void,
+	) {}
+
+	render(width: number): string[] {
+		const th = this.theme;
+		const s = this.getState();
+		this.hits = [];
+		if (s.error) return []; // stay out of the way outside git repos
+		const n = s.files.length;
+		const add = s.files.reduce((a, f) => a + (f.added ?? 0), 0);
+		const del = s.files.reduce((a, f) => a + (f.removed ?? 0), 0);
+		const summary = n
+			? `${th.fg("muted", `${n} file${n === 1 ? "" : "s"}`)} ${th.fg("success", `+${add}`)} ${th.fg("error", `-${del}`)}`
+			: `${th.fg("success", "✓")} ${th.fg("muted", "clean")}`;
+		const left = ` ${branchLine(th, s)}  ${summary}`;
+		const hint = th.fg("muted", `${KEY_LABEL} diff · /diff-panel off `);
+		const gap = width - visibleWidth(left) - visibleWidth(hint);
+		const lines = [gap >= 2 ? left + " ".repeat(gap) + hint : truncateToWidth(left, width, "…")];
+		if (!n) return lines;
+		this.hits.push({ row: 0, from: 0, to: visibleWidth(left), idx: 0 });
+
+		const stat = (f: FileEntry) => (f.added !== undefined ? ` +${f.added} -${f.removed}` : "");
+		const widest = Math.max(...s.files.map((f) => 2 + f.path.length + stat(f).length));
+		const cellW = Math.min(widest + 4, Math.max(20, width - 2));
+		const cols = Math.max(1, Math.floor((width - 1) / cellW));
+		const rows = Math.min(BAR_ROWS, Math.ceil(n / cols));
+		const visible = n > rows * cols ? rows * cols - 1 : n;
+		const grid: string[] = Array(rows).fill("");
+		const place = (i: number, cell: string, idx: number) => {
+			const r = i % rows;
+			const from = 1 + Math.floor(i / rows) * cellW;
+			grid[r] += " ".repeat(Math.max(0, from - visibleWidth(grid[r]!))) + truncateToWidth(cell, cellW - 2, "…");
+			this.hits.push({ row: 1 + r, from, to: from + cellW - 2, idx });
+		};
+		for (let i = 0; i < visible; i++) {
+			const f = s.files[i]!;
+			const st = stat(f);
+			const room = cellW - 4 - st.length;
+			const path = f.path.length > room ? `…${f.path.slice(-(room - 1))}` : f.path;
+			const stats = st ? ` ${th.fg("success", `+${f.added}`)} ${th.fg("error", `-${f.removed}`)}` : "";
+			place(i, `${th.fg(statusColor(f.code), f.code)} ${path}${stats}`, i);
+		}
+		if (visible < n) place(visible, th.fg("muted", `+${n - visible} more…`), visible);
+		return [...lines, ...grid.map((l) => truncateToWidth(l, width, "…"))];
+	}
+
+	handleMouse(e: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (e.type !== "click" || e.button !== "left") return undefined;
+		const hit = this.hits.find((h) => h.row === e.y && e.x >= h.from && e.x < h.to);
+		if (!hit) return undefined;
+		this.onOpen(hit.idx);
+		return { handled: true };
+	}
+
+	invalidate(): void {}
 }
 
 // ─── rendering helpers ────────────────────────────────────────────────────────
@@ -212,6 +359,9 @@ function branchLine(theme: Theme, s: RepoState): string {
 class DiffPanel implements Component, Focusable {
 	focused = false;
 	private selected = 0;
+	private listTop = 0;
+	private listStart = 0;
+	private listLen = 0;
 
 	constructor(
 		private tui: TUI,
@@ -224,7 +374,7 @@ class DiffPanel implements Component, Focusable {
 
 	handleInput(data: string): void {
 		const n = this.getState().files.length;
-		if (matchesKey(data, "escape") || matchesKey(data, FOCUS_KEY)) this.onBlur();
+		if (matchesKey(data, "escape") || CONFIG.keys.some((k) => matchesKey(data, k))) this.onBlur();
 		else if (matchesKey(data, "up") || data === "k") this.selected = Math.max(0, this.selected - 1);
 		else if (matchesKey(data, "down") || data === "j") this.selected = Math.min(n - 1, this.selected + 1);
 		else if (matchesKey(data, "enter") && n) this.onOpen(this.selected);
@@ -252,6 +402,7 @@ class DiffPanel implements Component, Focusable {
 
 		const listH = height - 2 - body.length;
 		const start = Math.max(0, Math.min(this.selected - Math.floor(listH / 2), s.files.length - listH));
+		[this.listTop, this.listStart, this.listLen] = [body.length + 1, start, Math.min(listH, s.files.length - start)];
 		for (const [i, f] of s.files.slice(start, start + listH).entries()) {
 			const idx = start + i;
 			const stats =
@@ -265,8 +416,26 @@ class DiffPanel implements Component, Focusable {
 		}
 		while (body.length < height - 2) body.push("");
 
-		const hint = this.focused ? "↑↓ ⏎ diff · r · esc" : `${FOCUS_KEY} focus`;
+		const hint = this.focused ? "↑↓ ⏎ diff · r · esc" : `${KEY_LABEL} or click`;
 		return frame(th, width, "Changes", body, th.fg("muted", hint), this.focused);
+	}
+
+	/** Click focuses the panel and selects a file; double-click (or click on the selected file) opens its diff. */
+	handleMouse(e: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (e.type === "wheel") {
+			const n = this.getState().files.length;
+			this.selected = Math.max(0, Math.min(n - 1, this.selected + Math.sign(e.wheelDelta ?? 0)));
+			return { handled: true, render: true };
+		}
+		if (e.type !== "click" || e.button !== "left") return e.type === "press" ? { handled: true } : undefined;
+		const row = e.y - this.listTop;
+		if (row >= 0 && row < this.listLen) {
+			const idx = this.listStart + row;
+			const open = (e.clickCount ?? 1) >= 2 || (this.focused && idx === this.selected);
+			this.selected = idx;
+			if (open) this.onOpen(idx);
+		}
+		return { focus: true, render: true };
 	}
 
 	invalidate(): void {}
@@ -315,6 +484,12 @@ class DiffView implements Component {
 
 	private bodyHeight(): number {
 		return Math.max(3, Math.floor(this.tui.terminal.rows * 0.92) - 2);
+	}
+
+	handleMouse(e: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (e.type !== "wheel") return undefined;
+		this.scroll += (e.wheelDelta ?? 0) * 3;
+		return { handled: true, render: true };
 	}
 
 	handleInput(data: string): void {
