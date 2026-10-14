@@ -18,6 +18,9 @@ A [pi](https://pi.dev) extension that shows your **uncommitted git changes** and
  > your prompt…
 ```
 
+<img width="1031" height="206" alt="Screenshot 2026-10-14 at 4 22 10 PM" src="https://github.com/user-attachments/assets/ab102c57-4a92-48e6-95de-7759605f2cf9" />
+
+
 By default the panel sits just above the editor and opens on every new session. You can move it to the left or right side instead.
 
 ## Install
