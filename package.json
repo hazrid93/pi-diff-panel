@@ -1,0 +1,24 @@
+{
+  "name": "pi-diff-panel",
+  "version": "0.1.0",
+  "description": "Persistent side panel for pi showing uncommitted git changes, current branch, and a syntax-highlighted diff viewer (like Claude Code's /diff).",
+  "type": "module",
+  "license": "MIT",
+  "author": "hazrid93",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hazrid93/pi-diff-panel.git"
+  },
+  "keywords": ["pi-package", "pi", "pi-extension", "git", "diff"],
+  "files": ["index.ts", "git.ts", "README.md", "LICENSE"],
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "scripts": {
+    "test": "bun test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
