@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/pi-diff-panel?style=flat-square)](https://www.npmjs.com/package/pi-diff-panel) [![npm downloads](https://img.shields.io/npm/dt/pi-diff-panel?style=flat-square&label=npm%20downloads)](https://www.npmjs.com/package/pi-diff-panel) [![license](https://img.shields.io/npm/l/pi-diff-panel?style=flat-square)](LICENSE)
 
-A [pi](https://pi.dev) extension that shows your **uncommitted git changes** and **current branch** in a panel, with a syntax-highlighted diff viewer — similar to `/diff` in Claude Code.
+A [pi](https://pi.dev) extension that shows your **uncommitted git changes** and **current branch** in a panel, with a syntax-highlighted diff viewer similar to `/diff` in Claude Code.
 
 ```
 ╭─ Changes ─────────────────────────────────────────────────────────╮
