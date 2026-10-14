@@ -5,9 +5,15 @@
 A [pi](https://pi.dev) extension that shows your **uncommitted git changes** and **current branch** in a panel, with a syntax-highlighted diff viewer — similar to `/diff` in Claude Code.
 
 ```
- ⎇ feature/demo ↑2  6 files +10 -7                      ctrl+\ diff · /diff-panel off
- D docs/notes.txt +0 -1    R src/config.js +0 -0     ? settings.json
- M src/app.py +6 -3        M src/math.ts +4 -3       ? src/utils.go
+╭─ Changes ─────────────────────────────────────────────────────────╮
+│ ⎇ feature/demo ↑2   12 files  +10 -7                              │
+├───────────────────────────────────────────────────────────────────┤
+│  M src/math.ts                                              +4 -3 │
+│  ? extra_1.txt                                                    ┃
+│▶ ? extra_4.txt                                                    ┃
+│  ? extra_5.txt                                                    │
+│  ? extra_6.txt                                                    │
+╰─ ↑↓ select · ⏎ diff · r refresh · esc back · 4–8 of 12 ───────────╯
 ───────────────────────────────────────────────────────────────────────────────
  > your prompt…
 ```
