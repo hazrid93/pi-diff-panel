@@ -28,9 +28,10 @@ To try it once without installing: `pi -e git:github.com/hazrid93/pi-diff-panel`
 | `/diff-panel on` \| `off` | Show or hide the panel |
 | `/diff-panel bottom` \| `left` \| `right` | Move the panel (for this session) |
 | `/diff-panel help` | Show keys and settings |
-| `ctrl+\` | Open the diff viewer. With a side panel, focus the panel instead. |
+| `ctrl+\` | Focus the panel: `↑↓` select, `PgUp/PgDn` page, `Enter` open the diff, `Esc` back to the editor |
+| `/diff-panel focus` | Same as `ctrl+\` |
 | `/diff` | Open the diff viewer |
-| Mouse click on a file | Open its diff (fullscreen mode only) |
+| Mouse wheel / click | Scroll the list / open a file's diff (fullscreen mode only) |
 
 When the panel is hidden, the footer shows a short hint: `⎇ /diff-panel · ctrl+\ diff`.
 
@@ -48,6 +49,7 @@ Add a `diffPanel` block to `~/.pi/agent/settings.json`, then run `/reload`:
 {
   "diffPanel": {
     "position": "bottom",
+    "height": 5,
     "key": "ctrl+\\",
     "autoShow": true
   }
@@ -56,6 +58,7 @@ Add a `diffPanel` block to `~/.pi/agent/settings.json`, then run `/reload`:
 
 | Setting | Values | Default |
 |---|---|---|
+| `height` | number of file rows in the bottom panel (1–40); longer lists scroll | `5` |
 | `position` | `"bottom"`, `"left"`, `"right"` | `"bottom"` |
 | `key` | a key, or a list of keys, in [pi key syntax](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/keybindings.md#key-syntax) | `"ctrl+\\"` |
 | `autoShow` | `true` shows the panel on every new session; `false` shows only the footer hint | `true` |

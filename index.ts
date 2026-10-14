@@ -26,9 +26,10 @@ const POSITIONS: Position[] = ["bottom", "left", "right"];
 
 // ctrl+\ is unused by pi and reaches pi from macOS terminals (ctrl+alt and cmd chords often don't).
 const DEFAULT_KEYS = ["ctrl+\\"];
+const DEFAULT_ROWS = 5;
 
 /** Reads the `diffPanel` block of ~/.pi/agent/settings.json. Changes apply after /reload. */
-function loadConfig(): { position: Position; keys: string[]; autoShow: boolean } {
+function loadConfig(): { position: Position; keys: string[]; autoShow: boolean; rows: number } {
 	let raw: Record<string, unknown> = {};
 	try {
 		raw = JSON.parse(readFileSync(join(getAgentDir(), "settings.json"), "utf8"))?.diffPanel ?? {};
@@ -38,10 +39,12 @@ function loadConfig(): { position: Position; keys: string[]; autoShow: boolean }
 	const keys = (Array.isArray(raw.key) ? raw.key : [raw.key]).filter(
 		(k): k is string => typeof k === "string" && k.length > 0,
 	);
+	const rows = Number(raw.height);
 	return {
 		position: POSITIONS.includes(raw.position as Position) ? (raw.position as Position) : "bottom",
 		keys: keys.length ? keys : DEFAULT_KEYS,
 		autoShow: raw.autoShow !== false,
+		rows: Number.isInteger(rows) && rows >= 1 && rows <= 40 ? rows : DEFAULT_ROWS,
 	};
 }
 
@@ -49,23 +52,23 @@ const CONFIG = loadConfig();
 const KEY_LABEL = CONFIG.keys[0]!;
 // shortcut: fixed rows kept free under the side panel for editor + footer; a tall multi-line editor can still be covered.
 const BOTTOM_RESERVE = 7;
-const BAR_ROWS = 3;
 const REFRESH_MS = 2000;
 // shortcut: very large diffs are cut at this many rows to keep highlighting fast.
 const MAX_ROWS = 5000;
 
 const HELP = [
 	"pi-diff-panel",
-	"  /diff-panel                 toggle the panel",
-	"  /diff-panel on | off        show or hide",
-	"  /diff-panel bottom|left|right  move it (this session)",
-	`  ${KEY_LABEL.padEnd(26)}  open diffs (bottom) or focus panel (side)`,
-	"  /diff                       open the diff viewer",
+	"  /diff-panel                     toggle the panel",
+	"  /diff-panel on | off            show or hide",
+	"  /diff-panel bottom|left|right   move it (this session)",
+	`  ${KEY_LABEL.padEnd(30)}  focus the panel (↑↓ select, ⏎ diff, esc back)`,
+	"  /diff                           open the diff viewer",
 	"Settings (~/.pi/agent/settings.json, then /reload):",
-	'  "diffPanel": { "position": "bottom", "key": "ctrl+\\\\", "autoShow": true }',
+	'  "diffPanel": { "position": "bottom", "height": 5, "key": "ctrl+\\\\", "autoShow": true }',
 ].join("\n");
 
 type Ui = ExtensionContext["ui"];
+type FocusTui = TUI & { getFocusedComponent?(): Component | null };
 
 export default function (pi: ExtensionAPI) {
 	let state: RepoState = { branch: "", ahead: 0, behind: 0, files: [] };
@@ -73,11 +76,16 @@ export default function (pi: ExtensionAPI) {
 	let position: Position = CONFIG.position;
 	let shown = false;
 	let ui: Ui | undefined;
-	let tui: TUI | undefined;
+	let tui: FocusTui | undefined;
+	let panel: DiffPanel | undefined;
 	let handle: OverlayHandle | undefined;
 	let closePanel: (() => void) | undefined;
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let refreshing = false;
+	let focusOnShow = false;
+	// Bottom panel is a widget, not an overlay, so focus is restored by hand.
+	let prevFocus: Component | null = null;
+	let editorFocus: Component | null = null;
 
 	const git = (args: string[]) => pi.exec("git", ["-c", "core.quotePath=false", ...args], { cwd, timeout: 10_000 });
 
@@ -119,9 +127,29 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
+	function focusPanel(): void {
+		if (!panel) {
+			focusOnShow = true; // side overlay mounts asynchronously
+			return;
+		}
+		if (position !== "bottom") return handle?.focus();
+		if (!tui || panel.focused) return;
+		prevFocus = tui.getFocusedComponent?.() ?? null;
+		tui.setFocus(panel);
+		tui.requestRender();
+	}
+
+	function blurPanel(): void {
+		if (position !== "bottom") return handle?.unfocus();
+		if (!tui || !panel?.focused) return;
+		tui.setFocus(prevFocus ?? editorFocus);
+		prevFocus = null;
+		tui.requestRender();
+	}
+
 	/** Footer hint so users who have the extension know how to open the panel. */
 	function setHint(ctx: ExtensionContext): void {
-		ctx.ui.setStatus("diff-panel", shown ? undefined : ctx.ui.theme.fg("muted", `⎇ /diff-panel · ${KEY_LABEL} diff`));
+		ctx.ui.setStatus("diff-panel", shown ? undefined : ctx.ui.theme.fg("muted", `⎇ /diff-panel · ${KEY_LABEL} changes`));
 	}
 
 	function showPanel(ctx: ExtensionContext): void {
@@ -129,26 +157,36 @@ export default function (pi: ExtensionAPI) {
 		shown = true;
 		ui = ctx.ui;
 		cwd = ctx.cwd;
+		const make = (t: TUI, theme: Theme) =>
+			new DiffPanel(
+				t,
+				theme,
+				() => state,
+				position === "bottom" ? "bottom" : "side",
+				(i) => ui && openViewer(ui, i),
+				blurPanel,
+				() => void refresh(),
+			);
 		if (position === "bottom") {
 			ctx.ui.setWidget("diff-panel", (t, theme) => {
 				tui = t;
-				return new BottomBar(theme, () => state, (i) => ui && openViewer(ui, i));
+				editorFocus = tui.getFocusedComponent?.() ?? null;
+				panel = make(t, theme);
+				return panel;
 			});
 			closePanel = () => ctx.ui.setWidget("diff-panel", undefined);
+			if (focusOnShow) {
+				focusOnShow = false;
+				focusPanel();
+			}
 		} else {
 			void ctx.ui
 				.custom<void>(
 					(t, theme, _kb, done) => {
 						tui = t;
 						closePanel = () => done();
-						return new DiffPanel(
-							t,
-							theme,
-							() => state,
-							(i) => ui && openViewer(ui, i),
-							() => handle?.unfocus(),
-							() => void refresh(),
-						);
+						panel = make(t, theme);
+						return panel;
 					},
 					{
 						overlay: true,
@@ -161,6 +199,8 @@ export default function (pi: ExtensionAPI) {
 						},
 						onHandle: (h) => {
 							handle = h;
+							if (focusOnShow) h.focus();
+							focusOnShow = false;
 						},
 					},
 				)
@@ -176,18 +216,21 @@ export default function (pi: ExtensionAPI) {
 
 	function hidePanel(ctx?: ExtensionContext): void {
 		if (!shown) return;
+		blurPanel();
 		shown = false;
 		clearInterval(timer);
 		timer = undefined;
 		const close = closePanel;
 		closePanel = undefined;
-		tui = undefined;
+		panel = undefined;
+		focusOnShow = false;
 		close?.();
+		tui = undefined;
 		if (ctx) setHint(ctx);
 	}
 
 	pi.registerCommand("diff-panel", {
-		description: "Show or hide the uncommitted-changes panel: /diff-panel [on|off|bottom|left|right|help]",
+		description: "Show or hide the uncommitted-changes panel: /diff-panel [on|off|bottom|left|right|focus|help]",
 		getArgumentCompletions: (prefix) => {
 			const opts = [
 				{ value: "on", label: "on", description: "Show the panel" },
@@ -195,6 +238,7 @@ export default function (pi: ExtensionAPI) {
 				{ value: "bottom", label: "bottom", description: "Show the panel above the editor" },
 				{ value: "left", label: "left", description: "Show the panel on the left side" },
 				{ value: "right", label: "right", description: "Show the panel on the right side" },
+				{ value: "focus", label: "focus", description: `Focus the panel (same as ${KEY_LABEL})` },
 				{ value: "help", label: "help", description: "Show keys and settings" },
 			].filter((o) => o.value.startsWith(prefix.trim()));
 			return opts.length ? opts : null;
@@ -202,13 +246,16 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const want = args.trim();
 			if (POSITIONS.includes(want as Position)) {
-				position = want as Position;
 				hidePanel(ctx);
+				position = want as Position;
 				showPanel(ctx);
 			} else if (want === "on") showPanel(ctx);
 			else if (want === "off") hidePanel(ctx);
-			else if (want === "help") ctx.ui.notify(HELP, "info");
-			else if (want) ctx.ui.notify(`Unknown option "${want}". Try: on, off, bottom, left, right, help`, "warning");
+			else if (want === "focus") {
+				focusPanel();
+				showPanel(ctx);
+			} else if (want === "help") ctx.ui.notify(HELP, "info");
+			else if (want) ctx.ui.notify(`Unknown option "${want}". Try: on, off, bottom, left, right, focus, help`, "warning");
 			else if (shown) hidePanel(ctx);
 			else showPanel(ctx);
 		},
@@ -224,21 +271,15 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// Side panel: toggle focus. Bottom bar (or hidden panel): open the diff viewer.
-	const onKey = async (ctx: ExtensionContext) => {
-		if (shown && position !== "bottom") {
-			if (handle?.isFocused()) handle.unfocus();
-			else handle?.focus();
-			return;
-		}
-		cwd = ctx.cwd;
-		await refresh();
-		openViewer(ctx.ui, 0);
-	};
+	// Fires only while the editor has focus; the focused panel handles the same key itself to give focus back.
 	for (const key of CONFIG.keys) {
 		pi.registerShortcut(key as Parameters<typeof pi.registerShortcut>[0], {
-			description: "Open uncommitted diffs (focuses the side panel when it is on the left/right)",
-			handler: onKey,
+			description: "Focus the diff panel (opens it if hidden)",
+			handler: (ctx) => {
+				if (shown && position !== "bottom" && handle?.isFocused()) return blurPanel();
+				focusPanel();
+				showPanel(ctx);
+			},
 		});
 	}
 
@@ -257,84 +298,34 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 
-// ─── bottom bar ────────────────────────────────────────────────────────────────
-
-/** Compact widget above the editor: branch, totals, and files in columns. Click a file to open its diff. */
-class BottomBar implements Component {
-	private hits: { row: number; from: number; to: number; idx: number }[] = [];
-
-	constructor(
-		private theme: Theme,
-		private getState: () => RepoState,
-		private onOpen: (index: number) => void,
-	) {}
-
-	render(width: number): string[] {
-		const th = this.theme;
-		const s = this.getState();
-		this.hits = [];
-		if (s.error) return []; // stay out of the way outside git repos
-		const n = s.files.length;
-		const add = s.files.reduce((a, f) => a + (f.added ?? 0), 0);
-		const del = s.files.reduce((a, f) => a + (f.removed ?? 0), 0);
-		const summary = n
-			? `${th.fg("muted", `${n} file${n === 1 ? "" : "s"}`)} ${th.fg("success", `+${add}`)} ${th.fg("error", `-${del}`)}`
-			: `${th.fg("success", "✓")} ${th.fg("muted", "clean")}`;
-		const left = ` ${branchLine(th, s)}  ${summary}`;
-		const hint = th.fg("muted", `${KEY_LABEL} diff · /diff-panel off `);
-		const gap = width - visibleWidth(left) - visibleWidth(hint);
-		const lines = [gap >= 2 ? left + " ".repeat(gap) + hint : truncateToWidth(left, width, "…")];
-		if (!n) return lines;
-		this.hits.push({ row: 0, from: 0, to: visibleWidth(left), idx: 0 });
-
-		const stat = (f: FileEntry) => (f.added !== undefined ? ` +${f.added} -${f.removed}` : "");
-		const widest = Math.max(...s.files.map((f) => 2 + f.path.length + stat(f).length));
-		const cellW = Math.min(widest + 4, Math.max(20, width - 2));
-		const cols = Math.max(1, Math.floor((width - 1) / cellW));
-		const rows = Math.min(BAR_ROWS, Math.ceil(n / cols));
-		const visible = n > rows * cols ? rows * cols - 1 : n;
-		const grid: string[] = Array(rows).fill("");
-		const place = (i: number, cell: string, idx: number) => {
-			const r = i % rows;
-			const from = 1 + Math.floor(i / rows) * cellW;
-			grid[r] += " ".repeat(Math.max(0, from - visibleWidth(grid[r]!))) + truncateToWidth(cell, cellW - 2, "…");
-			this.hits.push({ row: 1 + r, from, to: from + cellW - 2, idx });
-		};
-		for (let i = 0; i < visible; i++) {
-			const f = s.files[i]!;
-			const st = stat(f);
-			const room = cellW - 4 - st.length;
-			const path = f.path.length > room ? `…${f.path.slice(-(room - 1))}` : f.path;
-			const stats = st ? ` ${th.fg("success", `+${f.added}`)} ${th.fg("error", `-${f.removed}`)}` : "";
-			place(i, `${th.fg(statusColor(f.code), f.code)} ${path}${stats}`, i);
-		}
-		if (visible < n) place(visible, th.fg("muted", `+${n - visible} more…`), visible);
-		return [...lines, ...grid.map((l) => truncateToWidth(l, width, "…"))];
-	}
-
-	handleMouse(e: TuiMouseEvent): TuiMouseEventResult | undefined {
-		if (e.type !== "click" || e.button !== "left") return undefined;
-		const hit = this.hits.find((h) => h.row === e.y && e.x >= h.from && e.x < h.to);
-		if (!hit) return undefined;
-		this.onOpen(hit.idx);
-		return { handled: true };
-	}
-
-	invalidate(): void {}
-}
-
 // ─── rendering helpers ────────────────────────────────────────────────────────
 
-function frame(theme: Theme, width: number, title: string, body: string[], footer: string, active: boolean): string[] {
+/** Body row drawn as a full-width ├───┤ divider. */
+const DIVIDER = "\u0000divider";
+
+/** Rounded box. `thumb` marks body rows whose right border is drawn as a scrollbar thumb. */
+function frame(
+	theme: Theme,
+	width: number,
+	title: string,
+	body: string[],
+	footer: string,
+	active: boolean,
+	thumb?: { from: number; len: number },
+): string[] {
 	const inner = Math.max(4, width - 2);
 	const c = (s: string) => theme.fg(active ? "accent" : "border", s);
 	const edge = (left: string, label: string, right: string) => {
 		const text = label ? truncateToWidth(` ${label} `, inner - 1, "…") : "";
 		return c(left + "─") + text + c("─".repeat(Math.max(0, inner - 1 - visibleWidth(text))) + right);
 	};
+	const right = (i: number) =>
+		thumb && i >= thumb.from && i < thumb.from + thumb.len ? theme.fg("accent", "┃") : c("│");
 	return [
 		edge("╭", title, "╮"),
-		...body.map((l) => c("│") + truncateToWidth(l, inner, "…", true) + c("│")),
+		...body.map((l, i) =>
+			l === DIVIDER ? c(`├${"─".repeat(inner)}┤`) : c("│") + truncateToWidth(l, inner, "…", true) + right(i),
+		),
 		edge("╰", footer, "╯"),
 	];
 }
@@ -354,29 +345,55 @@ function branchLine(theme: Theme, s: RepoState): string {
 	return line;
 }
 
-// ─── side panel ───────────────────────────────────────────────────────────────
+function summaryLine(theme: Theme, s: RepoState): string {
+	if (s.error) return theme.fg("muted", s.error);
+	const n = s.files.length;
+	if (!n) return `${theme.fg("success", "✓")} ${theme.fg("muted", "working tree clean")}`;
+	const add = s.files.reduce((a, f) => a + (f.added ?? 0), 0);
+	const del = s.files.reduce((a, f) => a + (f.removed ?? 0), 0);
+	return `${theme.fg("muted", `${n} file${n === 1 ? "" : "s"}`)}  ${theme.fg("success", `+${add}`)} ${theme.fg("error", `-${del}`)}`;
+}
 
+// ─── changes panel (bottom or side) ─────────────────────────────────────────
+
+/** Fixed-height, scrollable file list. Bottom: `CONFIG.rows` rows above the editor. Side: full height. */
 class DiffPanel implements Component, Focusable {
 	focused = false;
 	private selected = 0;
-	private listTop = 0;
-	private listStart = 0;
-	private listLen = 0;
+	private top = 0;
+	private listRow = 0;
+	private listH = 1;
 
 	constructor(
 		private tui: TUI,
 		private theme: Theme,
 		private getState: () => RepoState,
+		private layout: "bottom" | "side",
 		private onOpen: (index: number) => void,
 		private onBlur: () => void,
 		private onRefresh: () => void,
 	) {}
 
+	private clampTop(n: number): void {
+		this.top = Math.max(0, Math.min(this.top, n - this.listH));
+	}
+
 	handleInput(data: string): void {
 		const n = this.getState().files.length;
-		if (matchesKey(data, "escape") || CONFIG.keys.some((k) => matchesKey(data, k))) this.onBlur();
-		else if (matchesKey(data, "up") || data === "k") this.selected = Math.max(0, this.selected - 1);
-		else if (matchesKey(data, "down") || data === "j") this.selected = Math.min(n - 1, this.selected + 1);
+		const page = Math.max(1, this.listH - 1);
+		const move = (to: number) => {
+			this.selected = Math.max(0, Math.min(n - 1, to));
+			if (this.selected < this.top) this.top = this.selected;
+			else if (this.selected >= this.top + this.listH) this.top = this.selected - this.listH + 1;
+		};
+		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || CONFIG.keys.some((k) => matchesKey(data, k)))
+			this.onBlur();
+		else if (matchesKey(data, "up") || data === "k") move(this.selected - 1);
+		else if (matchesKey(data, "down") || data === "j") move(this.selected + 1);
+		else if (matchesKey(data, "pageUp")) move(this.selected - page);
+		else if (matchesKey(data, "pageDown")) move(this.selected + page);
+		else if (matchesKey(data, "home") || data === "g") move(0);
+		else if (matchesKey(data, "end") || data === "G") move(n - 1);
 		else if (matchesKey(data, "enter") && n) this.onOpen(this.selected);
 		else if (data === "r") this.onRefresh();
 		this.tui.requestRender();
@@ -385,26 +402,22 @@ class DiffPanel implements Component, Focusable {
 	render(width: number): string[] {
 		const th = this.theme;
 		const s = this.getState();
+		const bottom = this.layout === "bottom";
+		if (bottom && s.error) return []; // stay out of the way outside git repos
 		const inner = width - 2;
-		const height = Math.max(6, this.tui.terminal.rows - BOTTOM_RESERVE);
-		this.selected = Math.max(0, Math.min(this.selected, s.files.length - 1));
+		const n = s.files.length;
+		const header = bottom
+			? [` ${branchLine(th, s)}   ${summaryLine(th, s)}`, DIVIDER]
+			: [` ${branchLine(th, s)}`, ` ${summaryLine(th, s)}`, DIVIDER];
+		const bodyH = bottom ? header.length + CONFIG.rows : Math.max(6, this.tui.terminal.rows - BOTTOM_RESERVE) - 2;
+		this.selected = Math.max(0, Math.min(this.selected, n - 1));
 
-		const body: string[] = [` ${branchLine(th, s)}`];
-		if (s.error) body.push(` ${th.fg("muted", s.error)}`);
-		else if (!s.files.length) body.push(` ${th.fg("success", "✓")} ${th.fg("muted", "working tree clean")}`);
-		else {
-			const add = s.files.reduce((a, f) => a + (f.added ?? 0), 0);
-			const del = s.files.reduce((a, f) => a + (f.removed ?? 0), 0);
-			const count = `${s.files.length} file${s.files.length === 1 ? "" : "s"}`;
-			body.push(` ${th.fg("muted", count)}  ${th.fg("success", `+${add}`)} ${th.fg("error", `-${del}`)}`);
-		}
-		body.push("");
-
-		const listH = height - 2 - body.length;
-		const start = Math.max(0, Math.min(this.selected - Math.floor(listH / 2), s.files.length - listH));
-		[this.listTop, this.listStart, this.listLen] = [body.length + 1, start, Math.min(listH, s.files.length - start)];
-		for (const [i, f] of s.files.slice(start, start + listH).entries()) {
-			const idx = start + i;
+		const body: string[] = [...header];
+		this.listRow = 1 + body.length;
+		this.listH = Math.max(1, bodyH - body.length);
+		this.clampTop(n);
+		for (let idx = this.top; idx < Math.min(n, this.top + this.listH); idx++) {
+			const f = s.files[idx]!;
 			const stats =
 				f.added !== undefined ? `${th.fg("success", `+${f.added}`)} ${th.fg("error", `-${f.removed}`)} ` : "";
 			const avail = inner - 4 - visibleWidth(stats) - 1;
@@ -414,28 +427,38 @@ class DiffPanel implements Component, Focusable {
 			const line = left + " ".repeat(Math.max(1, inner - visibleWidth(left) - visibleWidth(stats))) + stats;
 			body.push(sel ? th.bg("selectedBg", truncateToWidth(line, inner, "…", true)) : line);
 		}
-		while (body.length < height - 2) body.push("");
+		while (body.length < bodyH) body.push("");
 
-		const hint = this.focused ? "↑↓ ⏎ diff · r · esc" : `${KEY_LABEL} or click`;
-		return frame(th, width, "Changes", body, th.fg("muted", hint), this.focused);
+		let thumb: { from: number; len: number } | undefined;
+		let range = "";
+		if (n > this.listH) {
+			const len = Math.max(1, Math.round((this.listH * this.listH) / n));
+			const from = Math.round((this.top / (n - this.listH)) * (this.listH - len));
+			thumb = { from: this.listRow - 1 + from, len };
+			range = ` · ${this.top + 1}–${Math.min(n, this.top + this.listH)} of ${n}`;
+		}
+		const title = th.bold("Changes");
+		const hint = this.focused
+			? "↑↓ select · ⏎ diff · r refresh · esc back"
+			: `${KEY_LABEL} focus · click to open${bottom ? " · /diff-panel off" : ""}`;
+		return frame(th, width, title, body, th.fg("muted", hint + range), this.focused, thumb);
 	}
 
-	/** Click focuses the panel and selects a file; double-click (or click on the selected file) opens its diff. */
+	/** Wheel scrolls the list; a click on a file opens its diff. */
 	handleMouse(e: TuiMouseEvent): TuiMouseEventResult | undefined {
+		const n = this.getState().files.length;
 		if (e.type === "wheel") {
-			const n = this.getState().files.length;
-			this.selected = Math.max(0, Math.min(n - 1, this.selected + Math.sign(e.wheelDelta ?? 0)));
+			this.top += Math.sign(e.wheelDelta ?? 0);
+			this.clampTop(n);
 			return { handled: true, render: true };
 		}
-		if (e.type !== "click" || e.button !== "left") return e.type === "press" ? { handled: true } : undefined;
-		const row = e.y - this.listTop;
-		if (row >= 0 && row < this.listLen) {
-			const idx = this.listStart + row;
-			const open = (e.clickCount ?? 1) >= 2 || (this.focused && idx === this.selected);
-			this.selected = idx;
-			if (open) this.onOpen(idx);
-		}
-		return { focus: true, render: true };
+		if (e.type === "press") return { handled: true };
+		if (e.type !== "click" || e.button !== "left") return undefined;
+		const row = e.y - this.listRow;
+		if (row < 0 || row >= this.listH || this.top + row >= n) return { handled: true };
+		this.selected = this.top + row;
+		this.onOpen(this.selected);
+		return { handled: true, render: true };
 	}
 
 	invalidate(): void {}
